@@ -10,13 +10,18 @@ var params = {
   volume: false,
   isosurface: true,
   isoLevel: 0.7,
-  isoRange: 0.6
+  isoRange: 0.5
 };
 
 var clipBox = {
-  min: [0,0,0.4],
-  max: [1,1,0.6]
+  min: [0,0.3,0.3],
+  max: [1,1,0.7]
 };
+
+var distance = 3;
+var fov = 30;
+var theta = 4;
+var alpha = -0.5;
 
 
 var frag = `#version 300 es
@@ -296,11 +301,6 @@ function createProgram(gl, vert, frag) {
 var rayProgram = createProgram(gl, vert, frag);
 var isoProgram = createProgram(gl, isoVert, isoFrag);
 
-
-var distance = 5;
-var fov = 45;
-var theta = 0;
-var alpha = 0;
 var down = false;
 var downPos = [0, 0];
 var pos = [0, 0];
@@ -607,7 +607,7 @@ function updateIsosurface(gl, isoBuffer, isoNormalBuffer, dims, potential, bound
     gl.depthMask(true);
 
     // Calculate projection matrix
-    mat4.perspective(projectionMatrix, fov, width / height, 0.1, 100);
+    mat4.perspective(projectionMatrix, fov / 180 * Math.PI, width / height, 0.1, 100);
     var pos = [
       Math.cos(theta) * Math.cos(alpha) * distance,
       Math.sin(alpha) * distance,
