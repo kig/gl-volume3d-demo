@@ -6,11 +6,11 @@ const vec3     = require('gl-vec3')
 const isosurface = require('./lib/fastIsosurface')
 
 var params = {
-  isocaps: true,
-  volume: false,
+  renderer: 'isosurface',
   isosurface: true,
   isoLevel: 0.15,
-  isoRange: 0.1
+  isoRange: 0.1,
+  raySteps: 64
 };
 
 var clipBox = {
@@ -85,6 +85,7 @@ uniform bool uIsocaps;
 
 uniform float uIsoLevel;
 uniform float uIsoRange;
+uniform float uRaySteps;
 
 out vec4 color;
 
@@ -167,7 +168,7 @@ void main() {
     vec3 p1 = ro + rd * t1;
     vec4 accum = vec4(0.0);
     bool noHit = true;
-    float steps = ceil((t2-t1) * 64.0);
+    float steps = ceil((t2-t1) * uRaySteps);
     for (float i=0.0; i<=steps; i++) {
       float t = 1.0 - i/steps;
       vec3 uvw = (p1 + rd * (t2-t1) * t);
@@ -479,7 +480,7 @@ window.addEventListener('wheel', function(ev) {
   distance = Math.max(0.5, Math.min(10, distance));
 }, false);
 
-var controls = document.createElement('div');
+var controls = document.createElement('form');
 controls.className = 'controls';
 controls.style.position = 'absolute';
 controls.style.zIndex = 1;
@@ -493,9 +494,14 @@ controls.appendChild(createSlider('Max Y', clipBox.max, 1, 0, 1));
 controls.appendChild(createSlider('Max Z', clipBox.max, 2, 0, 1));
 controls.appendChild(createSlider('Iso level', params, 'isoLevel', 0, 1));
 controls.appendChild(createSlider('Iso range', params, 'isoRange', 0, 1));
+controls.appendChild(createRadioGroup('Renderer', params, 'renderer', 
+  [
+    ['Isosurface', 'isosurface'],
+    ['Volume', 'volume']
+  ]
+));
 controls.appendChild(createCheckbox('Isocaps', params, 'isocaps'));
-controls.appendChild(createCheckbox('Isosurface', params, 'isosurface'));
-controls.appendChild(createCheckbox('Volume', params, 'volume'));
+controls.appendChild(createSlider('Raymarch steps', params, 'raySteps', 32, 384));
 document.body.appendChild(controls);
 
 function createSlider(name, targetObj, targetValue, minValue, maxValue) {
@@ -513,6 +519,31 @@ function createCheckbox(name, targetObj, targetValue) {
   return createInput(name, targetObj, targetValue, 'checkbox', reader, {
     checked: targetObj[targetValue]
   });
+}
+
+function createRadioGroup(name, targetObj, targetValue, options) {
+  var div = document.createElement('div');
+  var title = document.createElement('h4');
+  title.textContent = name;
+  div.appendChild(title);
+  options.forEach(function(opt) {
+    var [oname, ovalue] = opt;
+    var inputContainer = document.createElement('div');
+    var label = document.createElement('label');
+    label.textContent = ' ' + oname;
+    var input = document.createElement('input');
+    input.name = name;
+    input.type = 'radio';
+    input.value = ovalue;
+    input.checked = targetObj[targetValue] === ovalue;
+    input.oninput = input.onchange = function(ev) {
+      targetObj[targetValue] = this.form[name].value;
+    };
+    inputContainer.appendChild(input);
+    inputContainer.appendChild(label);
+    div.appendChild(inputContainer);
+  });
+  return div;
 }
 
 function createInput(name, targetObj, targetValue, type, reader, params) {
@@ -571,19 +602,11 @@ var parseCSV = function(str) {
   return str.replace(/^\s+|\s+$/g, '').split(/\r?\n/g).map(function(x) { return x.split(',').map(parseFloat) });
 };
 
-var brains = [];
-for (var i=1; i<=109; i++) {
-  brains.push('data/MRbrain.' + i);
-}
+getData('data/MRbrain.txt', 'arraybuffer', function(mriBuffer) {
+  const dims = [256, 256, 109];
+  const [dataWidth, dataHeight, dataDepth] = dims;
 
-getDataMulti(brains, 'arraybuffer', function(mris) {
-  var dims = [256, 256, 109];
-  var [dataWidth, dataHeight, dataDepth] = dims;
-
-  var mri = new Uint16Array(mris.length * mris[0].byteLength/2);
-  for (var i=0; i<mris.length; i++) {
-    mri.set(new Uint16Array(mris[i]), i * mris[0].byteLength/2);
-  }
+  const mri = new Uint16Array(mriBuffer);
   for (var i=0; i<mri.length; i++) {
     mri[i] = ((mri[i] << 8) & 0xff00) | (mri[i] >> 8);
   }
@@ -702,6 +725,7 @@ getDataMulti(brains, 'arraybuffer', function(mris) {
     gl.uniform1f(gl.getCachedUniformLocation(program, 'uTime'), now() / 1000.0);
     gl.uniform1f(gl.getCachedUniformLocation(program, 'uIsoLevel'), params.isoLevel);
     gl.uniform1f(gl.getCachedUniformLocation(program, 'uIsoRange'), params.isoRange);
+    gl.uniform1f(gl.getCachedUniformLocation(program, 'uRaySteps'), params.raySteps);
     gl.uniform2f(gl.getCachedUniformLocation(program, 'uResolution'), width, height);
     gl.uniform3fv(gl.getCachedUniformLocation(program, 'uDimensions'), dims);
     gl.uniform3fv(gl.getCachedUniformLocation(program, 'uClipBoxMin'), clipBox.min);
@@ -749,7 +773,7 @@ getDataMulti(brains, 'arraybuffer', function(mris) {
   }
 
   function render() {
-    if (params.isosurface && (params.isoLevel !== currentIsoLevel || params.isoRange !== currentIsoRange)) {
+    if (params.renderer === 'isosurface' && (params.isoLevel !== currentIsoLevel || params.isoRange !== currentIsoRange)) {
       isoVerticeCount = updateIsosurface(gl, isoBuffer, isoNormalBuffer, dims, mri, bounds);
       currentIsoLevel = params.isoLevel;
       currentIsoRange = params.isoRange;
@@ -776,14 +800,14 @@ getDataMulti(brains, 'arraybuffer', function(mris) {
     mat4.translate(triangleMatrix, triangleMatrix, [-0.5, -0.5, -0.275]);
     mat4.scale(triangleMatrix, triangleMatrix, [1, 1, 0.55]);
 
-    if (params.volume) {
+    if (params.renderer === 'volume') {
       setUniforms(gl, rayProgram, width, height);
       setBuffer(gl, 0, triangleBuffer, 3, gl.FLOAT, false, 0, 0);
 
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
 
-    if (params.isosurface) {
+    if (params.renderer === 'isosurface') {
       setUniforms(gl, isoCapProgram, width, height);
       setBuffer(gl, 0, isoBuffer, 3, gl.FLOAT, false, 0, 0);
       setBuffer(gl, 1, isoNormalBuffer, 3, gl.FLOAT, false, 0, 0);
