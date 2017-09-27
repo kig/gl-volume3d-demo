@@ -6,16 +6,16 @@ const vec3     = require('gl-vec3')
 const isosurface = require('./lib/fastIsosurface')
 
 var params = {
-  renderer: 'isosurface',
-  isosurface: true,
-  isoLevel: 0.15,
-  isoRange: 0.1,
-  raySteps: 64
+  renderer: 'volume',
+  isocaps: false,
+  isoLevel: 0.65,
+  isoRange: 0.6,
+  raySteps: 256
 };
 
 var clipBox = {
-  min: [0,0.3,0.2],
-  max: [1,1,0.8]
+  min: [0,0,0],
+  max: [1,1,1]
 };
 
 var distance = 3;
@@ -603,6 +603,7 @@ var parseCSV = function(str) {
 };
 
 getData('data/MRbrain.txt', 'arraybuffer', function(mriBuffer) {
+
   const dims = [256, 256, 109];
   const [dataWidth, dataHeight, dataDepth] = dims;
 
