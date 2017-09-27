@@ -1,11 +1,11 @@
 {
   "name": "gl-volume3d-demo",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Volumetric rendering demo using isosurfaces and raymarching",
   "scripts": {
     "start": "budo --live --host localhost --open index.js:bundle.js",
-    "prepublish": "browserify index.js | uglifyjs -cm > bundle.js"
+    "build": "browserify index.js | uglifyjs -cm > bundle.js"
   },
   "browserify": {
     "transform": [
@@ -23,7 +23,6 @@
     "canvas-fit": "^1.2.0",
     "gl-mat4": "^1.0.1",
     "gl-vec3": "^1.0.3",
-    "isosurface": "^1.0.0",
     "right-now": "^1.0.0"
   },
   "devDependencies": {

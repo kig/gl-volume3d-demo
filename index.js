@@ -1,21 +1,21 @@
-var canvas   = document.body.appendChild(document.createElement('canvas'))
-var gl       = canvas.getContext('webgl2')
-var now      = require('right-now')
-var mat4     = require('gl-mat4')
-var vec3     = require('gl-vec3')
-var isosurface = require('isosurface');
+const canvas   = document.body.appendChild(document.createElement('canvas'))
+const gl       = canvas.getContext('webgl2')
+const now      = require('right-now')
+const mat4     = require('gl-mat4')
+const vec3     = require('gl-vec3')
+const isosurface = require('./lib/fastIsosurface')
 
 var params = {
   isocaps: true,
   volume: false,
   isosurface: true,
-  isoLevel: 0.7,
-  isoRange: 0.5
+  isoLevel: 0.15,
+  isoRange: 0.1
 };
 
 var clipBox = {
-  min: [0,0.3,0.3],
-  max: [1,1,0.7]
+  min: [0,0.3,0.2],
+  max: [1,1,0.8]
 };
 
 var distance = 3;
@@ -23,6 +23,46 @@ var fov = 30;
 var theta = 4;
 var alpha = -0.5;
 
+
+var shaderLib = {
+  raytrace: `
+    struct Box {
+      vec3 minPoint;
+      vec3 maxPoint;
+    };
+
+    bool boxIntersect(vec3 ro, vec3 rd, Box box, out float t1, out float t2, out vec3 nml)
+    {
+      vec3 ird = 1.0 / rd;
+      vec3 v1 = (box.minPoint - ro) * ird;
+      vec3 v2 = (box.maxPoint - ro) * ird;
+      vec3 n = min(v1, v2);
+      vec3 f = max(v1, v2);
+      float enter = max(n.x, max(n.y, n.z));
+      float exit = min(f.x, min(f.y, f.z));
+      if (exit > 0.0 && enter < exit) {
+        t1 = enter;
+        t2 = exit;
+        return true;
+      }
+      return false;
+    }
+
+    bool planeIntersect(vec3 ro, vec3 rd, vec3 p, vec3 nml, out float t)
+    {
+      float d = dot(nml, rd);
+      if (d <= 0.0) {
+        return false;
+      }
+      d = -dot(ro-p, nml) / d;
+      if (d < 0.0) {
+        return false;
+      }
+      t = d;
+      return true;
+    }
+    `
+}
 
 var frag = `#version 300 es
 
@@ -48,41 +88,7 @@ uniform float uIsoRange;
 
 out vec4 color;
 
-struct Box {
-  vec3 minPoint;
-  vec3 maxPoint;
-};
-
-bool boxIntersect(vec3 ro, vec3 rd, Box box, out float t1, out float t2, out vec3 nml)
-{
-  vec3 ird = 1.0 / rd;
-  vec3 v1 = (box.minPoint - ro) * ird;
-  vec3 v2 = (box.maxPoint - ro) * ird;
-  vec3 n = min(v1, v2);
-  vec3 f = max(v1, v2);
-  float enter = max(n.x, max(n.y, n.z));
-  float exit = min(f.x, min(f.y, f.z));
-  if (exit > 0.0 && enter < exit) {
-    t1 = enter;
-    t2 = exit;
-    return true;
-  }
-  return false;
-}
-
-bool planeIntersect(vec3 ro, vec3 rd, vec3 p, vec3 nml, out float t)
-{
-  float d = dot(nml, rd);
-  if (d <= 0.0) {
-    return false;
-  }
-  d = -dot(ro-p, nml) / d;
-  if (d < 0.0) {
-    return false;
-  }
-  t = d;
-  return true;
-}
+${shaderLib.raytrace}
 
 vec3 gradient(vec3 uvw, vec4 c)
 {
@@ -99,11 +105,30 @@ vec3 grey(vec3 rgb) {
 
 vec4 getColor(vec3 uvw, vec4 c) {
   vec3 grad = gradient(uvw, c);
-  float alpha = 4.0*mix(0.05*c.r, 0.01*c.r, pow(clamp(c.r+0., 0.0, 1.0), 4.0));
-  //if (abs(c.r - uIsoLevel) <= uIsoRange) {
-  //  alpha = 0.2;
-  //}
+  float alpha = 0.005; //mix(0.05*c.r, 0.01*c.r, pow(clamp(c.r+0., 0.0, 1.0), 4.0));
+  if (abs(c.r - uIsoLevel) <= uIsoRange) {
+    alpha = 0.15;
+  }
+  alpha *= c.a;
+  c.r = abs(c.r - uIsoLevel) * 2.0;
   vec3 col = 1.0-max(vec3(0.0), vec3(c.r*2., abs(0.7-c.r), 0.8-c.r)+0.5);
+  col = col.bgr;
+  col.r *= 0.75;
+  col.b *= 0.5;
+  return vec4(pow(grey(abs(grad))+abs(grad), vec3(0.5))+col, alpha);  
+}
+
+vec4 getCapColor(vec3 uvw, vec4 c) {
+  vec3 grad = gradient(uvw, c);
+  float alpha = 0.005; //mix(0.05*c.r, 0.01*c.r, pow(clamp(c.r+0., 0.0, 1.0), 4.0));
+  if (abs(c.r - uIsoLevel) <= uIsoRange) {
+    alpha = 0.15;
+  }
+  alpha *= c.a;
+  vec3 col = 1.0-max(vec3(0.0), vec3(c.r*2., abs(0.7-c.r), 0.8-c.r)+0.5);
+  col = col.bgr;
+  col.r *= 0.75;
+  col.b *= 0.5;
   return vec4(pow(grey(abs(grad))+abs(grad), vec3(0.5))+col, alpha);  
 }
 
@@ -125,7 +150,6 @@ void main() {
   vec3 ro = worldNear.xyz / worldNear.w;
   vec3 rd = normalize((worldFar.xyz / worldFar.w) - ro);
 
-  vec4 accum = vec4(0.0);
   color = vec4(0.0);
   float t1, t2;
   vec3 nml;
@@ -135,37 +159,35 @@ void main() {
     if ( uIsocaps && all(lessThanEqual(uvw, vec3(1.0))) && all(greaterThanEqual(uvw, vec3(0.0))) ) {
       vec4 c = texture(uTexture, uvw, -16.0);
       if (abs(c.r - uIsoLevel) <= uIsoRange) {
-        vec4 col = getColor(uvw, c);
+        vec4 col = getCapColor(uvw, c);
         color = 1.0 - col;
-        color.a = sqrt(c.r);
+        color.a = sqrt(c.r) * c.a;
       }
     }
     vec3 p1 = ro + rd * t1;
     vec4 accum = vec4(0.0);
     bool noHit = true;
-    float steps = (t2-t1) * 64.0;
-    float maxSteps = sqrt(3.0) * 64.0;
-    for (float i=0.0; i<maxSteps; i++) {
-      vec3 uvw = (p1 + rd * (t2-t1) * (1.0-i/steps));
+    float steps = ceil((t2-t1) * 64.0);
+    for (float i=0.0; i<=steps; i++) {
+      float t = 1.0 - i/steps;
+      vec3 uvw = (p1 + rd * (t2-t1) * t);
       //uvw += vec3(sin(uTime + uvw.y*6.0) * 0.2, 0.0, 0.0);
       vec3 ou = uvw;
       if (all(lessThanEqual(uvw, clipBox.maxPoint)) && all(greaterThanEqual(uvw, clipBox.minPoint)) ) {
         vec4 c = texture(uTexture, uvw, -16.0);
-        if (abs(c.r - uIsoLevel) <= uIsoRange) {
+        //if (abs(c.r - uIsoLevel) <= uIsoRange) {
           vec4 col = getColor(uvw, c);
           accum = mix(accum, col, col.a);
           noHit = false;
-        }
+        //}
       }
     }
-    if (noHit) {
-      discard;
-      return;
-    }
+//    if (noHit) {
+//      discard;
+//      return;
+//    }
     color = mix(1.0 - accum, color, color.a);
     color.a = 1.0;
-  } else {
-    discard;
   }
 }
 `;
@@ -211,16 +233,28 @@ uniform float uIsoRange;
 uniform vec3 uLightPosition;
 uniform vec4 uLightColor;
 
+uniform vec3 uClipBoxMin;
+uniform vec3 uClipBoxMax;
+
 out vec4 color;
 
+${shaderLib.raytrace}
+
 void main() {
+  Box clipBox = Box(uClipBoxMin, uClipBoxMax);
+  vec3 p = vPosition;
+  if (any(lessThan(p, clipBox.minPoint)) || any(greaterThan(p, clipBox.maxPoint))) {
+    discard;
+  }
   color = vec4(abs(dot(normalize(vNormal), -normalize(transpose(mat3(inverse(uModelView))) * uLightPosition))) * uLightColor * uLightColor.a);
+  /*
   if (vClipped > 0.0) {
     color = texture(uTexture, vPosition.xyz).rrra;
     if (!uIsocaps || (vClipped > 1.0 && abs(color.r - uIsoLevel) > uIsoRange)) {
       discard;
     }
   }
+  */
   color.a = 1.0;
 }`;
 
@@ -247,10 +281,107 @@ out vec3 vNormal;
 
 out float vClipped;
 
-struct Box {
-  vec3 minPoint;
-  vec3 maxPoint;
-};
+${shaderLib.raytrace}
+
+void main() {
+  Box clipBox = Box(uClipBoxMin, uClipBoxMax);
+
+  vec3 p = aPosition / uDimensions;
+  /*
+  vec3 cp = clamp(p, clipBox.minPoint, clipBox.maxPoint);
+  vec3 d = (p - cp) * uDimensions;
+  vec3 ad = abs(d);
+  float maxD = max(max(ad.x, ad.y), ad.z);
+  vClipped = maxD;
+  */
+  gl_Position = uProjection * uModelView * vec4(p, 1.0);
+  vPosition = p;
+  vNormal = normalize(transpose(mat3(inverse(uModelView))) * aNormal);
+}`;
+
+var isoCapFrag = `#version 300 es
+
+precision highp float;
+precision highp sampler3D;
+
+in vec3 vPosition;
+in vec3 vNormal;
+in float vClipped;
+
+uniform sampler3D uTexture;
+uniform float uTime;
+uniform vec2 uResolution;
+
+uniform mat4 uModelView;
+uniform mat4 uProjection;
+
+uniform bool uIsocaps;
+
+uniform float uIsoLevel;
+uniform float uIsoRange;
+
+uniform vec3 uLightPosition;
+uniform vec4 uLightColor;
+
+uniform vec3 uClipBoxMin;
+uniform vec3 uClipBoxMax;
+
+out vec4 color;
+
+${shaderLib.raytrace}
+
+void main() {
+  vec2 uv = gl_FragCoord.xy / uResolution * 2.0 - 1.0;
+
+  mat4 clipToEye = inverse(uProjection);
+  mat4 eyeToWorld = inverse(uModelView);
+
+  vec4 clipNear = vec4(uv, -1.0, 1.0);
+  vec4 clipFar = vec4(uv, 1.0, 1.0);
+
+  vec4 eyeNear = clipToEye * clipNear;
+  vec4 eyeFar = clipToEye * clipFar;
+
+  vec4 worldNear = eyeToWorld * eyeNear;
+  vec4 worldFar = eyeToWorld * eyeFar;
+
+  vec3 ro = worldNear.xyz / worldNear.w;
+  vec3 rd = normalize((worldFar.xyz / worldFar.w) - ro);
+
+  color = vec4(0.0);
+  float t1, t2;
+  vec3 nml;
+  Box clipBox = Box(uClipBoxMin, uClipBoxMax);
+  if (boxIntersect(ro, rd, clipBox, t1, t2, nml)) {
+    color = texture(uTexture, ro + rd * t1).rrra;
+  }
+  color.a = 1.0;
+}`;
+
+var isoCapVert = `#version 300 es
+
+#define POSITION_LOCATION 0
+#define NORMAL_LOCATION 1
+
+precision highp float;
+precision highp int;
+
+layout(location = POSITION_LOCATION) in vec3 aPosition;
+layout(location = NORMAL_LOCATION) in vec3 aNormal;
+
+uniform mat4 uModelView;
+uniform mat4 uProjection;
+uniform float uTime;
+uniform vec3 uClipBoxMin;
+uniform vec3 uClipBoxMax;
+uniform vec3 uDimensions;
+
+out vec3 vPosition;
+out vec3 vNormal;
+
+out float vClipped;
+
+${shaderLib.raytrace}
 
 void main() {
   Box clipBox = Box(uClipBoxMin, uClipBoxMax);
@@ -300,6 +431,7 @@ function createProgram(gl, vert, frag) {
 
 var rayProgram = createProgram(gl, vert, frag);
 var isoProgram = createProgram(gl, isoVert, isoFrag);
+var isoCapProgram = createProgram(gl, isoCapVert, isoCapFrag);
 
 var down = false;
 var downPos = [0, 0];
@@ -459,18 +591,6 @@ getDataMulti(brains, 'arraybuffer', function(mris) {
   var triangleMatrix   = mat4.create()
   var projectionMatrix = mat4.create()
 
-  var potential = function(x, y, z) {
-    if (x < 0 || x > (dataWidth-0.5) || y < 0 || y > (dataHeight-0.5) || z < 0 || z > (dataDepth-0.5)) {
-      return 0;
-    } 
-    x = Math.round(x);
-    y = Math.round(y);
-    z = Math.round(z);
-    var off = x + y * dataWidth + z * dataWidth * dataHeight;
-    var v = Math.max(0, Math.min(1, (mri[off] - 1300)/2000));
-    return Math.abs(v - params.isoLevel) <= params.isoRange;
-  };
-
 
   // ISOSURFACE TODO
   /*
@@ -494,46 +614,31 @@ getDataMulti(brains, 'arraybuffer', function(mris) {
     [dataWidth, dataHeight, dataDepth].map(x => x+1)
   ];
 
-function updateIsosurface(gl, isoBuffer, isoNormalBuffer, dims, potential, bounds) {
-  var obj = isosurface.marchingCubes(dims, potential, bounds);
-  var ps = obj.positions;
-  var verts = new Float32Array(3 * 3 * obj.cells.length);
-  var normals = new Float32Array(3 * 3 * obj.cells.length);
-  var nml = vec3.create();
-  var v1 = vec3.create();
-  var v2 = vec3.create();
-  for (var i = 0; i < obj.cells.length; i++) {
-    var cs = obj.cells[i];
-    var off = i * 9;
-    var p1,p2,p3;
-    p1 = ps[cs[0]];
-    p2 = ps[cs[1]];
-    p3 = ps[cs[2]];
-    vec3.subtract(v1, p2, p1);
-    vec3.subtract(v2, p3, p1);
-    vec3.cross(nml, v1, v2);
-    verts[off++] = p1[0]; verts[off++] = p1[1]; verts[off++] = p1[2];
-    verts[off++] = p2[0]; verts[off++] = p2[1]; verts[off++] = p2[2];
-    verts[off++] = p3[0]; verts[off++] = p3[1]; verts[off++] = p3[2];
-    off -= 9;
-    normals[off++] = nml[0]; normals[off++] = nml[1]; normals[off++] = nml[2];
-    normals[off++] = nml[0]; normals[off++] = nml[1]; normals[off++] = nml[2];
-    normals[off++] = nml[0]; normals[off++] = nml[1]; normals[off++] = nml[2];
+  function updateIsosurface(gl, isoBuffer, isoNormalBuffer, dims, mri, bounds) {
+    var isoLevel = ((params.isoLevel * 2000)+1300)|0;
+    var isoRange = (params.isoRange * 2000)|0;
+    var { vertices, normals } = isosurface.marchingCubes(dims, mri, isoLevel-isoRange, isoLevel+isoRange);
+    gl.bindBuffer(gl.ARRAY_BUFFER, isoBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, isoNormalBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, normals, gl.STATIC_DRAW);
+    return vertices.length / 3;
   }
-  gl.bindBuffer(gl.ARRAY_BUFFER, isoBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
-  gl.bindBuffer(gl.ARRAY_BUFFER, isoNormalBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, normals, gl.STATIC_DRAW);
-  return verts.length / 3;
-}
 
   var data = new Uint8Array(dataWidth*dataHeight*dataDepth*4);
+  var mriMin = 1/0;
+  var mriMax = -1/0;
   for (var i=0; i<mri.length; i++) {
-    var v = Math.max(0, Math.min(1, (mri[i] - 1300)/2000)) * 255;
+    var v = mri[i];
+    if (v < mriMin) mriMin = v;
+    if (v > mriMax) mriMax = v;
+  }
+  for (var i=0; i<mri.length; i++) {
+    var v = Math.max(0, Math.min(1, (mri[i]-1300)/2000)) * 255;
     data[i*4] = v;
     data[i*4+1] = v;
     data[i*4+2] = v;
-    data[i*4+3] = 255;
+    data[i*4+3] = v > 0 ? 255 : 0;
   }
 
   var texture = gl.createTexture();
@@ -544,7 +649,7 @@ function updateIsosurface(gl, isoBuffer, isoNormalBuffer, dims, potential, bound
   gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_BASE_LEVEL, 0);
   gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAX_LEVEL, Math.log2(dataWidth));
-  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); //_MIPMAP_LINEAR);
   gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texImage3D(
     gl.TEXTURE_3D,  // target
@@ -558,7 +663,7 @@ function updateIsosurface(gl, isoBuffer, isoNormalBuffer, dims, potential, bound
     gl.UNSIGNED_BYTE, // type
     data            // pixel
   );
-  gl.generateMipmap(gl.TEXTURE_3D);
+  //gl.generateMipmap(gl.TEXTURE_3D);
 
   var triangleBuffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, triangleBuffer);
@@ -575,23 +680,77 @@ function updateIsosurface(gl, isoBuffer, isoNormalBuffer, dims, potential, bound
   var isoBuffer = gl.createBuffer();
   var isoNormalBuffer = gl.createBuffer();
 
-  var isoVerticeCount = updateIsosurface(gl, isoBuffer, isoNormalBuffer, dims, potential, bounds);
-  var currentIsoLevel = params.isoLevel;
-  var currentIsoRange = params.isoRange;
+  var isoVerticeCount = 0;
+  var currentIsoLevel;
+  var currentIsoRange;
 
-  function uniloc(gl, program, name) {
+
+  gl.getCachedUniformLocation = function(program, name) {
     if (!program.uniformLocations) {
       program.uniformLocations = {};
     }
     if (!program.uniformLocations[name]) {
-      program.uniformLocations[name] = gl.getUniformLocation(program, name);
+      program.uniformLocations[name] = this.getUniformLocation(program, name);
     }
     return program.uniformLocations[name];
+  };
+
+  function setUniforms(gl, program, width, height) {
+    gl.useProgram(program);
+    gl.uniform1i(gl.getCachedUniformLocation(program, 'uTexture'), 0);
+    gl.uniform1i(gl.getCachedUniformLocation(program, 'uIsocaps'), params.isocaps ? 1 : 0);
+    gl.uniform1f(gl.getCachedUniformLocation(program, 'uTime'), now() / 1000.0);
+    gl.uniform1f(gl.getCachedUniformLocation(program, 'uIsoLevel'), params.isoLevel);
+    gl.uniform1f(gl.getCachedUniformLocation(program, 'uIsoRange'), params.isoRange);
+    gl.uniform2f(gl.getCachedUniformLocation(program, 'uResolution'), width, height);
+    gl.uniform3fv(gl.getCachedUniformLocation(program, 'uDimensions'), dims);
+    gl.uniform3fv(gl.getCachedUniformLocation(program, 'uClipBoxMin'), clipBox.min);
+    gl.uniform3fv(gl.getCachedUniformLocation(program, 'uClipBoxMax'), clipBox.max);
+    gl.uniform3fv(gl.getCachedUniformLocation(program, 'uLightPosition'), [1,1,1]);
+    gl.uniform4fv(gl.getCachedUniformLocation(program, 'uLightColor'), [1,1,1,1]);
+    gl.uniformMatrix4fv(gl.getCachedUniformLocation(program, 'uProjection'), false, projectionMatrix);
+    gl.uniformMatrix4fv(gl.getCachedUniformLocation(program, 'uModelView'), false, triangleMatrix);
+  }
+
+  // WebGL 2.0 is going to a direction where you have a program
+  // that maps input buffers to output buffers.
+  // You run the program and then fiddle with the buffers (CRUD).
+  function runShader(gl, program, uniforms, buffers, drawBuffers) {
+    gl.useProgram(program);
+    for (var i=0; i<buffers.length; i++) {
+      var buffer = buffers[i];
+      gl.bindBuffer(buffer.target, buffer);
+      gl.enableVertexAttribArray(i);
+      if (buffer.integer) {
+        gl.vertexAttribPointer(i, buffer.size, buffer.type, buffer.normalized, buffer.stride, buffer.offset);
+      } else {
+        gl.vertexAttribIPointer(i, buffer.size, buffer.type, buffer.stride, buffer.offset);
+      }
+    }
+    var texUnit = 0;
+    for (var i in uniforms) {
+      var loc = gl.getCachedUniformLocation(program, i);
+      var v = uniforms[i];
+      if (v instanceof WebGLTexture) {
+        gl.activeTexture(texUnit);
+        gl.bindTexture(v.type, v);
+        gl.uniform1i(loc, texUnit);
+        texUnit++;
+      } else {
+        gl[v.type](loc, v.value);
+      }
+    }
+  }
+
+  function setBuffer(gl, location, buffer, a,b,c,d,e) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.enableVertexAttribArray(location);
+    gl.vertexAttribPointer(location, a, b, c, d, e);      
   }
 
   function render() {
     if (params.isosurface && (params.isoLevel !== currentIsoLevel || params.isoRange !== currentIsoRange)) {
-      isoVerticeCount = updateIsosurface(gl, isoBuffer, isoNormalBuffer, dims, potential, bounds);
+      isoVerticeCount = updateIsosurface(gl, isoBuffer, isoNormalBuffer, dims, mri, bounds);
       currentIsoLevel = params.isoLevel;
       currentIsoRange = params.isoRange;
     }
@@ -601,7 +760,7 @@ function updateIsosurface(gl, isoBuffer, isoNormalBuffer, dims, potential, bound
     // Clear the screen and set the viewport before
     // drawing anything
     gl.clearColor(1,1,1,1);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
     gl.viewport(0, 0, width, height);
     gl.enable(gl.DEPTH_TEST);
     gl.depthMask(true);
@@ -614,43 +773,61 @@ function updateIsosurface(gl, isoBuffer, isoNormalBuffer, dims, potential, bound
       Math.sin(theta) * Math.cos(alpha) * distance
     ];
     mat4.lookAt(triangleMatrix, pos, [0,0,0], [0,-1,0]);
-    mat4.translate(triangleMatrix, triangleMatrix, [-0.5, -0.5, -0.3]);
-    mat4.scale(triangleMatrix, triangleMatrix, [1, 1, 0.6]);
-
-    function setUniforms(gl, program) {
-      gl.useProgram(program);
-      gl.uniform1i(uniloc(gl, program, 'uTexture'), texture);
-      gl.uniform1i(uniloc(gl, program, 'uIsocaps'), params.isocaps ? 1 : 0);
-      gl.uniform1f(uniloc(gl, program, 'uTime'), now() / 1000.0);
-      gl.uniform1f(uniloc(gl, program, 'uIsoLevel'), params.isoLevel);
-      gl.uniform1f(uniloc(gl, program, 'uIsoRange'), params.isoRange);
-      gl.uniform2f(uniloc(gl, program, 'uResolution'), width, height);
-      gl.uniform3fv(uniloc(gl, program, 'uDimensions'), dims);
-      gl.uniform3fv(uniloc(gl, program, 'uClipBoxMin'), clipBox.min);
-      gl.uniform3fv(uniloc(gl, program, 'uClipBoxMax'), clipBox.max);
-      gl.uniform3fv(uniloc(gl, program, 'uLightPosition'), [1,1,1]);
-      gl.uniform4fv(uniloc(gl, program, 'uLightColor'), [1,1,1,1]);
-      gl.uniformMatrix4fv(uniloc(gl, program, 'uProjection'), false, projectionMatrix);
-      gl.uniformMatrix4fv(uniloc(gl, program, 'uModelView'), false, triangleMatrix);
-    }
+    mat4.translate(triangleMatrix, triangleMatrix, [-0.5, -0.5, -0.275]);
+    mat4.scale(triangleMatrix, triangleMatrix, [1, 1, 0.55]);
 
     if (params.volume) {
-      setUniforms(gl, rayProgram);
-      gl.bindBuffer(gl.ARRAY_BUFFER, triangleBuffer);
-      gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
-      gl.disableVertexAttribArray(1);
+      setUniforms(gl, rayProgram, width, height);
+      setBuffer(gl, 0, triangleBuffer, 3, gl.FLOAT, false, 0, 0);
+
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
+
     if (params.isosurface) {
-      setUniforms(gl, isoProgram);
-      gl.bindBuffer(gl.ARRAY_BUFFER, isoBuffer);
-      gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
-      gl.bindBuffer(gl.ARRAY_BUFFER, isoNormalBuffer);
-      gl.enableVertexAttribArray(1);
-      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 0, 0);
-      gl.drawArrays(gl.TRIANGLES, 0, isoVerticeCount);
+      setUniforms(gl, isoCapProgram, width, height);
+      setBuffer(gl, 0, isoBuffer, 3, gl.FLOAT, false, 0, 0);
+      setBuffer(gl, 1, isoNormalBuffer, 3, gl.FLOAT, false, 0, 0);
+
+      gl.enable(gl.CULL_FACE);
+      {
+        gl.disable(gl.DEPTH_TEST);
+        gl.depthMask(false);
+        gl.colorMask(false, false, false, false);
+
+        gl.enable(gl.STENCIL_TEST);
+        {
+          gl.stencilFunc(gl.ALWAYS, 0, 0);
+          gl.stencilOp(gl.KEEP, gl.KEEP, gl.INCR);
+
+          gl.cullFace(gl.BACK);
+          gl.drawArrays(gl.TRIANGLES, 0, isoVerticeCount);
+
+          gl.stencilOp(gl.KEEP, gl.KEEP, gl.DECR);
+
+          gl.cullFace(gl.FRONT);
+          gl.drawArrays(gl.TRIANGLES, 0, isoVerticeCount);
+
+          gl.enable(gl.DEPTH_TEST);
+          gl.depthMask(true);
+          gl.colorMask(true, true, true, true);
+          gl.stencilFunc(gl.EQUAL, 0, 0xffffff);
+
+          setUniforms(gl, isoProgram, width, height);
+          gl.cullFace(gl.FRONT);
+          gl.drawArrays(gl.TRIANGLES, 0, isoVerticeCount);
+
+          if (params.isocaps) {
+            setUniforms(gl, isoCapProgram, width, height);
+            gl.stencilFunc(gl.NOTEQUAL, 0, 0xffffff);
+
+            gl.cullFace(gl.BACK);
+            gl.drawArrays(gl.TRIANGLES, 0, isoVerticeCount);
+          }
+        }
+        gl.disable(gl.STENCIL_TEST);
+
+      } 
+      gl.disable(gl.CULL_FACE);
     }
   }
 
