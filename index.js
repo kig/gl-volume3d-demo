@@ -4,10 +4,12 @@ const now      = require('right-now')
 const mat4     = require('gl-mat4')
 const vec3     = require('gl-vec3')
 const isosurface = require('./lib/fastIsosurface')
+const computeVertexNormals = require('./lib/computeVertexNormals').computeVertexNormals
 
 var params = {
-  renderer: 'volume',
+  renderer: 'isosurface',
   isocaps: false,
+  smoothing: false,
   isoLevel: 0.65,
   isoRange: 0.6,
   raySteps: 256
@@ -244,10 +246,15 @@ ${shaderLib.raytrace}
 void main() {
   Box clipBox = Box(uClipBoxMin, uClipBoxMax);
   vec3 p = vPosition;
-  if (any(lessThan(p, clipBox.minPoint)) || any(greaterThan(p, clipBox.maxPoint))) {
-    discard;
-  }
-  color = vec4(abs(dot(normalize(vNormal), -normalize(transpose(mat3(inverse(uModelView))) * uLightPosition))) * uLightColor * uLightColor.a);
+  //if (any(lessThan(p, clipBox.minPoint)) || any(greaterThan(p, clipBox.maxPoint))) {
+  //  discard;
+  //}
+  float diffuse = dot(normalize(vNormal), -normalize(transpose(mat3(inverse(uModelView))) * uLightPosition));
+  //if (diffuse < 0.0) {
+  //  diffuse *= 0.5;
+  //}
+  diffuse = abs(diffuse);
+  color = vec4(diffuse * uLightColor * uLightColor.a);
   /*
   if (vClipped > 0.0) {
     color = texture(uTexture, vPosition.xyz).rrra;
@@ -500,6 +507,7 @@ controls.appendChild(createRadioGroup('Renderer', params, 'renderer',
     ['Volume', 'volume']
   ]
 ));
+controls.appendChild(createCheckbox('Smoothing', params, 'smoothing'));
 controls.appendChild(createCheckbox('Isocaps', params, 'isocaps'));
 controls.appendChild(createSlider('Raymarch steps', params, 'raySteps', 32, 384));
 document.body.appendChild(controls);
@@ -627,26 +635,42 @@ getData('data/MRbrain.txt', 'arraybuffer', function(mriBuffer) {
       - Generate isosurface
       - Raycast along clip plane and count intersections
       - Generate triangles for rays with odd number of intersections
-    [ ] Generate smooth vertex normals for the isosurface
+    [x] Generate smooth vertex normals for the isosurface
       - Find the faces that share the vertex
       - Average the face normals
     [ ] Experiment with marching cubes in the ray marcher
   */
 
   var bounds = [
-    [0,0,0].map(x => x-1), 
-    [dataWidth, dataHeight, dataDepth].map(x => x+1)
+    [0,0,0], 
+    [dataWidth, dataHeight, dataDepth]
   ];
 
-  function updateIsosurface(gl, isoBuffer, isoNormalBuffer, dims, mri, bounds) {
+  function updateIsosurface(gl, isoBuffer, isoNormalBuffer, isoCapBuffer, isoCapNormalBuffer, dims, mri, bounds) {
     var isoLevel = ((params.isoLevel * 2000)+1300)|0;
     var isoRange = (params.isoRange * 2000)|0;
-    var { vertices, normals } = isosurface.marchingCubes(dims, mri, isoLevel-isoRange, isoLevel+isoRange);
+    var a = clipBox.min;
+    var b = clipBox.max;
+    var ibounds = [
+      clipBox.min.map((v,i) => Math.floor(v * dims[i]+1)),
+      clipBox.max.map((v,i) => Math.ceil(v * dims[i]-1)),
+    ];
+    var iso = isosurface.marchingCubes(dims, mri, isoLevel-isoRange, isoLevel+isoRange, ibounds);
+    var cap = isosurface.marchingCubesCaps(dims, mri, isoLevel-isoRange, isoLevel+isoRange, ibounds);
+    if (params.smoothing) {
+      computeVertexNormals(iso.vertices, iso.normals, iso.normals);
+    }
     gl.bindBuffer(gl.ARRAY_BUFFER, isoBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, iso.vertices, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, isoNormalBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, normals, gl.STATIC_DRAW);
-    return vertices.length / 3;
+    gl.bufferData(gl.ARRAY_BUFFER, iso.normals, gl.STATIC_DRAW);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, isoCapBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, cap.vertices, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, isoCapNormalBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, cap.normals, gl.STATIC_DRAW);
+
+    return [iso.vertices.length / 3, cap.vertices.length / 3];
   }
 
   var data = new Uint8Array(dataWidth*dataHeight*dataDepth*4);
@@ -704,9 +728,14 @@ getData('data/MRbrain.txt', 'arraybuffer', function(mriBuffer) {
   var isoBuffer = gl.createBuffer();
   var isoNormalBuffer = gl.createBuffer();
 
+  var isoCapBuffer = gl.createBuffer();
+  var isoCapNormalBuffer = gl.createBuffer();
+
   var isoVerticeCount = 0;
+  var isoCapVerticeCount = 0;
   var currentIsoLevel;
   var currentIsoRange;
+  var currentSmoothing;
 
 
   gl.getCachedUniformLocation = function(program, name) {
@@ -774,10 +803,13 @@ getData('data/MRbrain.txt', 'arraybuffer', function(mriBuffer) {
   }
 
   function render() {
-    if (params.renderer === 'isosurface' && (params.isoLevel !== currentIsoLevel || params.isoRange !== currentIsoRange)) {
-      isoVerticeCount = updateIsosurface(gl, isoBuffer, isoNormalBuffer, dims, mri, bounds);
+    if (params.renderer === 'isosurface' && (params.smoothing !== currentSmoothing || params.isoLevel !== currentIsoLevel || params.isoRange !== currentIsoRange)) {
+      var counts = updateIsosurface(gl, isoBuffer, isoNormalBuffer, isoCapBuffer, isoCapNormalBuffer, dims, mri, bounds);
+      isoVerticeCount = counts[0];
+      isoCapVerticeCount = counts[1];
       currentIsoLevel = params.isoLevel;
       currentIsoRange = params.isoRange;
+      currentSmoothing = params.smoothing;
     }
     var width = gl.drawingBufferWidth;
     var height = gl.drawingBufferHeight;
@@ -809,50 +841,19 @@ getData('data/MRbrain.txt', 'arraybuffer', function(mriBuffer) {
     }
 
     if (params.renderer === 'isosurface') {
-      setUniforms(gl, isoCapProgram, width, height);
+      setUniforms(gl, isoProgram, width, height);
       setBuffer(gl, 0, isoBuffer, 3, gl.FLOAT, false, 0, 0);
       setBuffer(gl, 1, isoNormalBuffer, 3, gl.FLOAT, false, 0, 0);
 
-      gl.enable(gl.CULL_FACE);
-      {
-        gl.disable(gl.DEPTH_TEST);
-        gl.depthMask(false);
-        gl.colorMask(false, false, false, false);
+      gl.drawArrays(gl.TRIANGLES, 0, isoVerticeCount);
 
-        gl.enable(gl.STENCIL_TEST);
-        {
-          gl.stencilFunc(gl.ALWAYS, 0, 0);
-          gl.stencilOp(gl.KEEP, gl.KEEP, gl.INCR);
+      if (params.isocaps) {
+        setUniforms(gl, isoCapProgram, width, height);
+        setBuffer(gl, 0, isoCapBuffer, 3, gl.FLOAT, false, 0, 0);
+        setBuffer(gl, 1, isoCapNormalBuffer, 3, gl.FLOAT, false, 0, 0);
 
-          gl.cullFace(gl.BACK);
-          gl.drawArrays(gl.TRIANGLES, 0, isoVerticeCount);
-
-          gl.stencilOp(gl.KEEP, gl.KEEP, gl.DECR);
-
-          gl.cullFace(gl.FRONT);
-          gl.drawArrays(gl.TRIANGLES, 0, isoVerticeCount);
-
-          gl.enable(gl.DEPTH_TEST);
-          gl.depthMask(true);
-          gl.colorMask(true, true, true, true);
-          gl.stencilFunc(gl.EQUAL, 0, 0xffffff);
-
-          setUniforms(gl, isoProgram, width, height);
-          gl.cullFace(gl.FRONT);
-          gl.drawArrays(gl.TRIANGLES, 0, isoVerticeCount);
-
-          if (params.isocaps) {
-            setUniforms(gl, isoCapProgram, width, height);
-            gl.stencilFunc(gl.NOTEQUAL, 0, 0xffffff);
-
-            gl.cullFace(gl.BACK);
-            gl.drawArrays(gl.TRIANGLES, 0, isoVerticeCount);
-          }
-        }
-        gl.disable(gl.STENCIL_TEST);
-
-      } 
-      gl.disable(gl.CULL_FACE);
+        gl.drawArrays(gl.TRIANGLES, 0, isoCapVerticeCount);
+      }
     }
   }
 
