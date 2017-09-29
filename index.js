@@ -1,9 +1,12 @@
-const canvas   = document.body.appendChild(document.createElement('canvas'))
-const gl       = canvas.getContext('webgl2')
-const now      = require('right-now')
-const mat4     = require('gl-mat4')
-const vec3     = require('gl-vec3')
-const isosurface = require('./lib/fastIsosurface')
+const canvas   = document.body.appendChild(document.createElement('canvas'));
+const gl       = canvas.getContext('webgl2');
+const now      = require('right-now');
+const mat4     = require('gl-mat4');
+const vec3     = require('gl-vec3');
+const isosurface = require('./lib/fastIsosurface');
+
+const shaders = require('./shaders/shaders.js');
+
 const computeVertexNormals = require('./lib/computeVertexNormals').computeVertexNormals
 
 var params = {
@@ -24,356 +27,6 @@ var distance = 3;
 var fov = 30;
 var theta = 4;
 var alpha = -0.5;
-
-
-var shaderLib = {
-  raytrace: `
-    struct Box {
-      vec3 minPoint;
-      vec3 maxPoint;
-    };
-
-    bool boxIntersect(vec3 ro, vec3 rd, Box box, out float t1, out float t2, out vec3 nml)
-    {
-      vec3 ird = 1.0 / rd;
-      vec3 v1 = (box.minPoint - ro) * ird;
-      vec3 v2 = (box.maxPoint - ro) * ird;
-      vec3 n = min(v1, v2);
-      vec3 f = max(v1, v2);
-      float enter = max(n.x, max(n.y, n.z));
-      float exit = min(f.x, min(f.y, f.z));
-      if (exit > 0.0 && enter < exit) {
-        t1 = enter;
-        t2 = exit;
-        return true;
-      }
-      return false;
-    }
-
-    bool planeIntersect(vec3 ro, vec3 rd, vec3 p, vec3 nml, out float t)
-    {
-      float d = dot(nml, rd);
-      if (d <= 0.0) {
-        return false;
-      }
-      d = -dot(ro-p, nml) / d;
-      if (d < 0.0) {
-        return false;
-      }
-      t = d;
-      return true;
-    }
-    `
-}
-
-var frag = `#version 300 es
-
-precision highp float;
-precision highp sampler3D;
-
-in vec3 vPosition;
-
-uniform sampler3D uTexture;
-uniform float uTime;
-uniform vec2 uResolution;
-
-uniform mat4 uModelView;
-uniform mat4 uProjection;
-
-uniform vec3 uClipBoxMin;
-uniform vec3 uClipBoxMax;
-
-uniform bool uIsocaps;
-
-uniform float uIsoLevel;
-uniform float uIsoRange;
-uniform float uRaySteps;
-
-out vec4 color;
-
-${shaderLib.raytrace}
-
-vec3 gradient(vec3 uvw, vec4 c)
-{
-  vec3 e = vec3(0.0, 0.0, 1.0 / 256.0);
-  vec4 dx = texture(uTexture, uvw + e.zxx, -16.0) - c;
-  vec4 dy = texture(uTexture, uvw + e.xzx, -16.0) - c;
-  vec4 dz = texture(uTexture, uvw + e.xxz, -16.0) - c;
-  return vec3(dx.r, dy.r, dz.r);
-}
-
-vec3 grey(vec3 rgb) {
-  return vec3((rgb.r + rgb.g + rgb.b) / 3.0);
-}
-
-vec4 getColor(vec3 uvw, vec4 c) {
-  vec3 grad = gradient(uvw, c);
-  float alpha = 0.005; //mix(0.05*c.r, 0.01*c.r, pow(clamp(c.r+0., 0.0, 1.0), 4.0));
-  if (abs(c.r - uIsoLevel) <= uIsoRange) {
-    alpha = 0.15;
-  }
-  alpha *= c.a;
-  c.r = abs(c.r - uIsoLevel) * 2.0;
-  vec3 col = 1.0-max(vec3(0.0), vec3(c.r*2., abs(0.7-c.r), 0.8-c.r)+0.5);
-  col = col.bgr;
-  col.r *= 0.75;
-  col.b *= 0.5;
-  return vec4(pow(grey(abs(grad))+abs(grad), vec3(0.5))+col, alpha);  
-}
-
-vec4 getCapColor(vec3 uvw, vec4 c) {
-  vec3 grad = gradient(uvw, c);
-  float alpha = 0.005; //mix(0.05*c.r, 0.01*c.r, pow(clamp(c.r+0., 0.0, 1.0), 4.0));
-  if (abs(c.r - uIsoLevel) <= uIsoRange) {
-    alpha = 0.15;
-  }
-  alpha *= c.a;
-  vec3 col = 1.0-max(vec3(0.0), vec3(c.r*2., abs(0.7-c.r), 0.8-c.r)+0.5);
-  col = col.bgr;
-  col.r *= 0.75;
-  col.b *= 0.5;
-  return vec4(pow(grey(abs(grad))+abs(grad), vec3(0.5))+col, alpha);  
-}
-
-void main() {
-  vec2 uv = gl_FragCoord.xy / uResolution * 2.0 - 1.0;
-
-  mat4 clipToEye = inverse(uProjection);
-  mat4 eyeToWorld = inverse(uModelView);
-
-  vec4 clipNear = vec4(uv, -1.0, 1.0);
-  vec4 clipFar = vec4(uv, 1.0, 1.0);
-
-  vec4 eyeNear = clipToEye * clipNear;
-  vec4 eyeFar = clipToEye * clipFar;
-
-  vec4 worldNear = eyeToWorld * eyeNear;
-  vec4 worldFar = eyeToWorld * eyeFar;
-
-  vec3 ro = worldNear.xyz / worldNear.w;
-  vec3 rd = normalize((worldFar.xyz / worldFar.w) - ro);
-
-  color = vec4(0.0);
-  float t1, t2;
-  vec3 nml;
-  Box clipBox = Box(uClipBoxMin, uClipBoxMax);
-  if (boxIntersect(ro, rd, clipBox, t1, t2, nml)) {
-    vec3 uvw = (ro + rd * t1);
-    if ( uIsocaps && all(lessThanEqual(uvw, vec3(1.0))) && all(greaterThanEqual(uvw, vec3(0.0))) ) {
-      vec4 c = texture(uTexture, uvw, -16.0);
-      if (abs(c.r - uIsoLevel) <= uIsoRange) {
-        vec4 col = getCapColor(uvw, c);
-        color = 1.0 - col;
-        color.a = sqrt(c.r) * c.a;
-      }
-    }
-    vec3 p1 = ro + rd * t1;
-    vec4 accum = vec4(0.0);
-    bool noHit = true;
-    float steps = ceil((t2-t1) * uRaySteps);
-    for (float i=0.0; i<=steps; i++) {
-      float t = 1.0 - i/steps;
-      vec3 uvw = (p1 + rd * (t2-t1) * t);
-      //uvw += vec3(sin(uTime + uvw.y*6.0) * 0.2, 0.0, 0.0);
-      vec3 ou = uvw;
-      if (all(lessThanEqual(uvw, clipBox.maxPoint)) && all(greaterThanEqual(uvw, clipBox.minPoint)) ) {
-        vec4 c = texture(uTexture, uvw, -16.0);
-        //if (abs(c.r - uIsoLevel) <= uIsoRange) {
-          vec4 col = getColor(uvw, c);
-          accum = mix(accum, col, col.a);
-          noHit = false;
-        //}
-      }
-    }
-//    if (noHit) {
-//      discard;
-//      return;
-//    }
-    color = mix(1.0 - accum, color, color.a);
-    color.a = 1.0;
-  }
-}
-`;
-
-var vert = `#version 300 es
-
-#define POSITION_LOCATION 0
-
-precision highp float;
-precision highp int;
-
-layout(location = POSITION_LOCATION) in vec3 aPosition;
-
-out vec3 vPosition;
-
-void main() {
-  gl_Position = vec4(aPosition, 1.0);
-  vPosition = gl_Position.xyz;
-}`;
-
-
-var isoFrag = `#version 300 es
-
-precision highp float;
-precision highp sampler3D;
-
-in vec3 vPosition;
-in vec3 vNormal;
-in float vClipped;
-
-uniform sampler3D uTexture;
-uniform float uTime;
-uniform vec2 uResolution;
-
-uniform mat4 uModelView;
-uniform mat4 uProjection;
-
-uniform bool uIsocaps;
-
-uniform float uIsoLevel;
-uniform float uIsoRange;
-
-uniform vec3 uLightPosition;
-uniform vec4 uLightColor;
-
-uniform vec3 uClipBoxMin;
-uniform vec3 uClipBoxMax;
-
-out vec4 color;
-
-${shaderLib.raytrace}
-
-void main() {
-  Box clipBox = Box(uClipBoxMin, uClipBoxMax);
-  vec3 p = vPosition;
-  //if (any(lessThan(p, clipBox.minPoint)) || any(greaterThan(p, clipBox.maxPoint))) {
-  //  discard;
-  //}
-  float diffuse = dot(normalize(vNormal), -normalize(transpose(mat3(inverse(uModelView))) * uLightPosition));
-  //if (diffuse < 0.0) {
-  //  diffuse *= 0.5;
-  //}
-  diffuse = abs(diffuse);
-  color = vec4(diffuse * uLightColor * uLightColor.a);
-  /*
-  if (vClipped > 0.0) {
-    color = texture(uTexture, vPosition.xyz).rrra;
-    if (!uIsocaps || (vClipped > 1.0 && abs(color.r - uIsoLevel) > uIsoRange)) {
-      discard;
-    }
-  }
-  */
-  color.a = 1.0;
-}`;
-
-var isoVert = `#version 300 es
-
-#define POSITION_LOCATION 0
-#define NORMAL_LOCATION 1
-
-precision highp float;
-precision highp int;
-
-layout(location = POSITION_LOCATION) in vec3 aPosition;
-layout(location = NORMAL_LOCATION) in vec3 aNormal;
-
-uniform mat4 uModelView;
-uniform mat4 uProjection;
-uniform float uTime;
-uniform vec3 uClipBoxMin;
-uniform vec3 uClipBoxMax;
-uniform vec3 uDimensions;
-
-out vec3 vPosition;
-out vec3 vNormal;
-
-out float vClipped;
-
-${shaderLib.raytrace}
-
-void main() {
-  Box clipBox = Box(uClipBoxMin, uClipBoxMax);
-
-  vec3 p = aPosition / uDimensions;
-  /*
-  vec3 cp = clamp(p, clipBox.minPoint, clipBox.maxPoint);
-  vec3 d = (p - cp) * uDimensions;
-  vec3 ad = abs(d);
-  float maxD = max(max(ad.x, ad.y), ad.z);
-  vClipped = maxD;
-  */
-  gl_Position = uProjection * uModelView * vec4(p, 1.0);
-  vPosition = p;
-  vNormal = normalize(transpose(mat3(inverse(uModelView))) * aNormal);
-}`;
-
-var isoCapFrag = `#version 300 es
-
-precision highp float;
-precision highp sampler3D;
-
-in vec3 vPosition;
-in vec3 vNormal;
-in float vClipped;
-
-uniform sampler3D uTexture;
-uniform float uTime;
-uniform vec2 uResolution;
-
-uniform mat4 uModelView;
-uniform mat4 uProjection;
-
-uniform bool uIsocaps;
-
-uniform float uIsoLevel;
-uniform float uIsoRange;
-
-uniform vec3 uLightPosition;
-uniform vec4 uLightColor;
-
-uniform vec3 uClipBoxMin;
-uniform vec3 uClipBoxMax;
-
-out vec4 color;
-
-${shaderLib.raytrace}
-
-void main() {
-  color = texture(uTexture, vPosition).rrra;
-  color.a = 1.0;
-}`;
-
-var isoCapVert = `#version 300 es
-
-#define POSITION_LOCATION 0
-#define NORMAL_LOCATION 1
-
-precision highp float;
-precision highp int;
-
-layout(location = POSITION_LOCATION) in vec3 aPosition;
-layout(location = NORMAL_LOCATION) in vec3 aNormal;
-
-uniform mat4 uModelView;
-uniform mat4 uProjection;
-uniform float uTime;
-uniform vec3 uClipBoxMin;
-uniform vec3 uClipBoxMax;
-uniform vec3 uDimensions;
-
-out vec3 vPosition;
-out vec3 vNormal;
-
-out float vClipped;
-
-${shaderLib.raytrace}
-
-void main() {
-  vec3 p = aPosition / uDimensions;
-  gl_Position = uProjection * uModelView * vec4(p, 1.0);
-  vPosition = p;
-  vNormal = normalize(transpose(mat3(inverse(uModelView))) * aNormal);
-}`;
 
 function ifWarn(name, str) {
   if (str && /[^\s\0]/.test(str)) {
@@ -407,9 +60,9 @@ function createProgram(gl, vert, frag) {
   return program;
 }
 
-var rayProgram = createProgram(gl, vert, frag);
-var isoProgram = createProgram(gl, isoVert, isoFrag);
-var isoCapProgram = createProgram(gl, isoCapVert, isoCapFrag);
+var rayProgram = createProgram(gl, shaders.rayMarch.vert, shaders.rayMarch.frag);
+var isoProgram = createProgram(gl, shaders.isoSurface.vert, shaders.isoSurface.frag);
+var isoCapProgram = createProgram(gl, shaders.isoCap.vert, shaders.isoCap.frag);
 
 var down = false;
 var downPos = [0, 0];
@@ -621,10 +274,10 @@ getData('data/MRbrain.txt', 'arraybuffer', function(mriBuffer) {
     var isoRange = (params.isoRange * 2000)|0;
     var a = clipBox.min;
     var b = clipBox.max;
-    var ibounds = [
-      clipBox.min.map((v,i) => Math.floor(v * dims[i])),
-      clipBox.max.map((v,i) => Math.ceil(v * dims[i])),
-    ];
+    var ibounds = [[0,0,0], dims];
+//      clipBox.min.map((v,i) => Math.floor(v * dims[i])),
+//      clipBox.max.map((v,i) => Math.ceil(v * dims[i])),
+//    ];
     var iso = isosurface.marchingCubes(dims, mri, isoLevel-isoRange, isoLevel+isoRange, ibounds);
     var cap = isosurface.marchingCubesCaps(dims, mri, isoLevel-isoRange, isoLevel+isoRange, ibounds);
     if (params.smoothing) {
@@ -778,7 +431,7 @@ getData('data/MRbrain.txt', 'arraybuffer', function(mriBuffer) {
       params.smoothing !== currentSmoothing || 
       params.isoLevel !== currentIsoLevel || 
       params.isoRange !== currentIsoRange ||
-      JSON.stringify(clipBox) !== currentBounds
+      false //JSON.stringify(clipBox) !== currentBounds
     )) {
       var counts = updateIsosurface(gl, isoBuffer, isoNormalBuffer, isoCapBuffer, isoCapNormalBuffer, dims, mri, clipBox);
       isoVerticeCount = counts[0];
@@ -786,7 +439,7 @@ getData('data/MRbrain.txt', 'arraybuffer', function(mriBuffer) {
       currentIsoLevel = params.isoLevel;
       currentIsoRange = params.isoRange;
       currentSmoothing = params.smoothing;
-      currentBounds = JSON.stringify(clipBox);
+      //currentBounds = JSON.stringify(clipBox);
     }
     var width = gl.drawingBufferWidth;
     var height = gl.drawingBufferHeight;
@@ -825,7 +478,7 @@ getData('data/MRbrain.txt', 'arraybuffer', function(mriBuffer) {
       gl.drawArrays(gl.TRIANGLES, 0, isoVerticeCount);
 
       if (params.isocaps && isoCapVerticeCount > 0) {
-        setUniforms(gl, isoCapProgram, width, height);
+        setUniforms(gl, isoProgram, width, height);
         setBuffer(gl, 0, isoCapBuffer, 3, gl.FLOAT, false, 0, 0);
         setBuffer(gl, 1, isoCapNormalBuffer, 3, gl.FLOAT, false, 0, 0);
 
