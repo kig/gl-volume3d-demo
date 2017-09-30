@@ -19,7 +19,7 @@ var params = {
 };
 
 var clipBox = {
-  min: [0.3, 0.3, 0.2],
+  min: [0.3, 0.3, 0.1],
   max: [0.8, 0.8, 0.8]
 };
 
@@ -269,17 +269,11 @@ getData('data/MRbrain.txt', 'arraybuffer', function(mriBuffer) {
     [dataWidth, dataHeight, dataDepth]
   ];
 
-  function updateIsosurface(gl, isoBuffer, isoNormalBuffer, isoCapBuffer, isoCapNormalBuffer, dims, mri, clipBox) {
+  function updateIsosurface(gl, isoBuffer, isoNormalBuffer, dims, mri, clipBox) {
     var isoLevel = ((params.isoLevel * 2000)+1300)|0;
     var isoRange = (params.isoRange * 2000)|0;
-    var a = clipBox.min;
-    var b = clipBox.max;
     var ibounds = [[0,0,0], dims];
-//      clipBox.min.map((v,i) => Math.floor(v * dims[i])),
-//      clipBox.max.map((v,i) => Math.ceil(v * dims[i])),
-//    ];
     var iso = isosurface.marchingCubes(dims, mri, isoLevel-isoRange, isoLevel+isoRange, ibounds);
-    var cap = isosurface.marchingCubesCaps(dims, mri, isoLevel-isoRange, isoLevel+isoRange, ibounds);
     if (params.smoothing) {
       computeVertexNormals(iso.vertices, iso.normals, iso.normals);
     }
@@ -287,13 +281,23 @@ getData('data/MRbrain.txt', 'arraybuffer', function(mriBuffer) {
     gl.bufferData(gl.ARRAY_BUFFER, iso.vertices, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, isoNormalBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, iso.normals, gl.STATIC_DRAW);
+    return iso.vertices.length / 3;
+  }
 
+  function updateIsoCaps(gl, isoCapBuffer, isoCapNormalBuffer, dims, mri, clipBox) {
+    var isoLevel = ((params.isoLevel * 2000)+1300)|0;
+    var isoRange = (params.isoRange * 2000)|0;
+    var ibounds = [
+      clipBox.min.map((v,i) => Math.floor(v * dims[i])),
+      clipBox.max.map((v,i) => Math.ceil(v * dims[i])),
+    ];
+    var cap = isosurface.marchingCubesCaps(dims, mri, isoLevel-isoRange, isoLevel+isoRange, ibounds);
     gl.bindBuffer(gl.ARRAY_BUFFER, isoCapBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, cap.vertices, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, isoCapNormalBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, cap.normals, gl.STATIC_DRAW);
 
-    return [iso.vertices.length / 3, cap.vertices.length / 3];
+    return cap.vertices.length / 3;
   }
 
   var data = new Uint8Array(dataWidth*dataHeight*dataDepth*4);
@@ -390,36 +394,6 @@ getData('data/MRbrain.txt', 'arraybuffer', function(mriBuffer) {
     gl.uniformMatrix4fv(gl.getCachedUniformLocation(program, 'uModelView'), false, triangleMatrix);
   }
 
-  // WebGL 2.0 is going to a direction where you have a program
-  // that maps input buffers to output buffers.
-  // You run the program and then fiddle with the buffers (CRUD).
-  function runShader(gl, program, uniforms, buffers, drawBuffers) {
-    gl.useProgram(program);
-    for (var i=0; i<buffers.length; i++) {
-      var buffer = buffers[i];
-      gl.bindBuffer(buffer.target, buffer);
-      gl.enableVertexAttribArray(i);
-      if (buffer.integer) {
-        gl.vertexAttribPointer(i, buffer.size, buffer.type, buffer.normalized, buffer.stride, buffer.offset);
-      } else {
-        gl.vertexAttribIPointer(i, buffer.size, buffer.type, buffer.stride, buffer.offset);
-      }
-    }
-    var texUnit = 0;
-    for (var i in uniforms) {
-      var loc = gl.getCachedUniformLocation(program, i);
-      var v = uniforms[i];
-      if (v instanceof WebGLTexture) {
-        gl.activeTexture(texUnit);
-        gl.bindTexture(v.type, v);
-        gl.uniform1i(loc, texUnit);
-        texUnit++;
-      } else {
-        gl[v.type](loc, v.value);
-      }
-    }
-  }
-
   function setBuffer(gl, location, buffer, a,b,c,d,e) {
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
     gl.enableVertexAttribArray(location);
@@ -427,19 +401,26 @@ getData('data/MRbrain.txt', 'arraybuffer', function(mriBuffer) {
   }
 
   function render() {
-    if (params.renderer === 'isosurface' && (
-      params.smoothing !== currentSmoothing || 
-      params.isoLevel !== currentIsoLevel || 
-      params.isoRange !== currentIsoRange ||
-      false //JSON.stringify(clipBox) !== currentBounds
-    )) {
-      var counts = updateIsosurface(gl, isoBuffer, isoNormalBuffer, isoCapBuffer, isoCapNormalBuffer, dims, mri, clipBox);
-      isoVerticeCount = counts[0];
-      isoCapVerticeCount = counts[1];
-      currentIsoLevel = params.isoLevel;
-      currentIsoRange = params.isoRange;
-      currentSmoothing = params.smoothing;
-      //currentBounds = JSON.stringify(clipBox);
+    if (params.renderer === 'isosurface') {
+      var needIsosurfaceUpdate = (
+        params.smoothing !== currentSmoothing || 
+        params.isoLevel !== currentIsoLevel || 
+        params.isoRange !== currentIsoRange
+      );
+      var needIsoCapsUpdate = (
+        needIsosurfaceUpdate || 
+        JSON.stringify(clipBox) !== currentBounds
+      );
+      if (needIsosurfaceUpdate) {
+        isoVerticeCount = updateIsosurface(gl, isoBuffer, isoNormalBuffer, dims, mri, clipBox);
+        currentIsoLevel = params.isoLevel;
+        currentIsoRange = params.isoRange;
+        currentSmoothing = params.smoothing;
+      }
+      if (needIsoCapsUpdate) {
+        isoCapVerticeCount = updateIsoCaps(gl, isoCapBuffer, isoCapNormalBuffer, dims, mri, clipBox);
+        currentBounds = JSON.stringify(clipBox);
+      }
     }
     var width = gl.drawingBufferWidth;
     var height = gl.drawingBufferHeight;
@@ -478,7 +459,7 @@ getData('data/MRbrain.txt', 'arraybuffer', function(mriBuffer) {
       gl.drawArrays(gl.TRIANGLES, 0, isoVerticeCount);
 
       if (params.isocaps && isoCapVerticeCount > 0) {
-        setUniforms(gl, isoProgram, width, height);
+        setUniforms(gl, isoCapProgram, width, height);
         setBuffer(gl, 0, isoCapBuffer, 3, gl.FLOAT, false, 0, 0);
         setBuffer(gl, 1, isoCapNormalBuffer, 3, gl.FLOAT, false, 0, 0);
 

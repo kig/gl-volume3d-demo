@@ -31,21 +31,15 @@ out vec4 color;
 ${shaderLib.raytrace}
 
 void main() {
-  Box clipBox = Box(uClipBoxMin, uClipBoxMax);
-  vec3 p = vPosition;
-  if (!uIsocaps && (any(lessThan(p, clipBox.minPoint)) || any(greaterThan(p, clipBox.maxPoint)))) {
+  vec3 dims = vec3(textureSize(uTexture, 0));
+  Box clipBox = Box(uClipBoxMin * dims, uClipBoxMax * dims);
+  vec3 p = vPosition * dims;
+  if ((any(lessThan(p-floor(clipBox.minPoint), vec3(-0.01))) || any(greaterThan(p-floor(clipBox.maxPoint), vec3(0.01))))) {
     discard;
   }
   float diffuse = dot(normalize(vNormal), -normalize(transpose(mat3(inverse(uModelView))) * uLightPosition));
   diffuse = abs(diffuse);
   color = vec4(diffuse * uLightColor * uLightColor.a);
-  vec3 eps = vec3(0.001);
-  if (uIsocaps && any(lessThan(abs(p-clipBox.minPoint), eps)) || any(lessThan(abs(p-clipBox.maxPoint), eps))) {
-    color = texture(uTexture, vPosition.xyz).rrra;
-    if (color.r < uIsoLevel-uIsoRange || color.r > uIsoLevel+uIsoRange) {
-      discard;
-    }
-  }
   color.a = 1.0;
 }`;
 
@@ -78,7 +72,7 @@ void main() {
 
   vec3 p = aPosition / uDimensions;
   vec3 cp = uIsocaps ? clamp(p, clipBox.minPoint, clipBox.maxPoint) : p;
-  gl_Position = uProjection * uModelView * vec4(cp, 1.0);
-  vPosition = cp;
+  gl_Position = uProjection * uModelView * vec4(p, 1.0);
+  vPosition = p;
   vNormal = normalize(transpose(mat3(inverse(uModelView))) * aNormal);
 }`;
